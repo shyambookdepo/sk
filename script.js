@@ -67,6 +67,7 @@ const AppState = {
   entriesSearch: '',
   activeModalStudentIndex: 0,
   activeModalCategoryTabs: {}, // Map of studentIndex -> tabId
+  pendingStatusChanges: {},    // Map of "studentIndex-itemIndex" -> newStatus
   // Admin state
   isAdminLoggedIn: false,
   adminUsername: '',
@@ -1145,11 +1146,65 @@ const Invoice = {
       const invNum = result.data ? result.data.invoiceNumber : '';
       showToast(`Record ${invNum} created successfully!`, 'success');
       Modal.hide('modal-checkout');
+
+      // Send WhatsApp message for all pending books
+      try {
+        this.sendNewInvoiceWhatsAppNotification(invNum, name, mobile, studentsData);
+      } catch (waErr) {
+        console.error('Error triggering WhatsApp notification:', waErr);
+      }
+
       this.reset();
 
       // Go back to school selection
       document.getElementById('invoice-view').classList.add('hidden');
       document.getElementById('school-selection').classList.remove('hidden');
+    }
+  },
+
+  sendNewInvoiceWhatsAppNotification(invNum, customerName, mobile, studentsData) {
+    const pendingItemsByStudent = [];
+
+    studentsData.forEach((student, sIndex) => {
+      const pendingForThisStudent = student.items.filter(item => Number(item.status) === 1);
+      if (pendingForThisStudent.length > 0) {
+        pendingItemsByStudent.push({
+          studentIndex: sIndex + 1,
+          className: student.className,
+          schoolName: student.schoolName,
+          items: pendingForThisStudent
+        });
+      }
+    });
+
+    if (pendingItemsByStudent.length === 0) {
+      return; // No pending items
+    }
+
+    let messageText = `*Shyam Book Depot*\n`;
+    messageText += `Invoice: ${invNum}\n`;
+    messageText += `Customer: ${customerName}\n\n`;
+    messageText += `Dear Customer, the following items are currently pending and will be delivered soon:\n\n`;
+
+    pendingItemsByStudent.forEach(s => {
+      messageText += `*Student ${s.studentIndex} (${s.className})*\n`;
+      const countMap = {};
+      s.items.forEach(item => {
+        countMap[item.name] = (countMap[item.name] || 0) + 1;
+      });
+
+      Object.entries(countMap).forEach(([itemName, qty]) => {
+        messageText += `- ${itemName} x${qty}\n`;
+      });
+      messageText += `\n`;
+    });
+
+    messageText += `We will notify you once they are ready. Thank you!`;
+
+    const cleanedMobile = String(mobile).replace(/\D/g, '');
+    if (cleanedMobile.length === 10) {
+      const waUrl = `https://api.whatsapp.com/send?phone=91${cleanedMobile}&text=${encodeURIComponent(messageText)}`;
+      window.open(waUrl, '_blank');
     }
   },
 
@@ -1332,6 +1387,7 @@ const Entries = {
 
     AppState.activeModalStudentIndex = 0;
     AppState.activeModalCategoryTabs = {};
+    AppState.pendingStatusChanges = {};
 
     const statusClass = this.getInvoiceStatus(entry.students);
     const statusText = statusClass.toUpperCase();
@@ -1350,6 +1406,7 @@ const Entries = {
     `;
 
     html += this.renderEntryDetails(entry);
+    html += this.renderBatchActionBar(entry);
 
     document.getElementById('invoice-details-body').innerHTML = html;
     Modal.show('modal-invoice-details');
@@ -1561,18 +1618,159 @@ const Entries = {
 
   renderItemActions(invoiceNumber, studentIndex, itemIndex, status) {
     let actions = '';
+    const key = `${studentIndex}-${itemIndex}`;
+    const selectedStatus = AppState.pendingStatusChanges[key];
+
+    const getBtnHtml = (btnClass, text, newStatus) => {
+      const isSelected = selectedStatus === newStatus;
+      const tickHtml = isSelected ? '<span class="action-tick">✓</span>' : '';
+      const selectedClass = isSelected ? 'is-selected' : '';
+      return `
+        <div class="action-btn-wrapper">
+          <button class="btn ${btnClass} btn-sm btn-status-action ${selectedClass}" 
+                  onclick="event.stopPropagation(); Entries.handleActionClick(event, '${escapeHtml(invoiceNumber)}', ${studentIndex}, ${itemIndex}, ${newStatus})"
+                  ondblclick="event.stopPropagation(); Entries.handleActionDblClick(event, '${escapeHtml(invoiceNumber)}', ${studentIndex}, ${itemIndex}, ${newStatus})">
+            ${text}
+          </button>
+          ${tickHtml}
+        </div>
+      `;
+    };
 
     if (status === 1) {
       // Pending → can deliver or cancel
-      actions += `<button class="btn btn-success btn-sm" onclick="event.stopPropagation(); Entries.updateItemStatus('${escapeHtml(invoiceNumber)}', ${studentIndex}, ${itemIndex}, 0)">✅ Deliver</button>`;
-      actions += `<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); Entries.updateItemStatus('${escapeHtml(invoiceNumber)}', ${studentIndex}, ${itemIndex}, 3)">❌ Cancel</button>`;
+      actions += getBtnHtml('btn-success', '✅ Deliver', 0);
+      actions += getBtnHtml('btn-secondary', '❌ Cancel', 3);
     } else if (status === 0) {
       // Delivered → can return
-      actions += `<button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); Entries.updateItemStatus('${escapeHtml(invoiceNumber)}', ${studentIndex}, ${itemIndex}, 2)">↩️ Return</button>`;
+      actions += getBtnHtml('btn-danger', '↩️ Return', 2);
     }
     // Returned/Cancelled → no actions
 
     return actions;
+  },
+
+  handleActionClick(event, invoiceNumber, studentIndex, itemIndex, newStatus) {
+    const key = `${studentIndex}-${itemIndex}`;
+    AppState.pendingStatusChanges[key] = newStatus;
+    this.refreshDetailsModal(invoiceNumber);
+  },
+
+  handleActionDblClick(event, invoiceNumber, studentIndex, itemIndex, newStatus) {
+    const key = `${studentIndex}-${itemIndex}`;
+    if (AppState.pendingStatusChanges[key] === newStatus) {
+      delete AppState.pendingStatusChanges[key];
+    }
+    this.refreshDetailsModal(invoiceNumber);
+  },
+
+  refreshDetailsModal(invoiceNumber) {
+    const entry = AppState.entries.find(e => e.invoiceNumber === invoiceNumber);
+    if (!entry) return;
+
+    const statusClass = this.getInvoiceStatus(entry.students);
+    const statusText = statusClass.toUpperCase();
+    document.getElementById('invoice-details-title').innerHTML = 
+      `#${entry.invoiceNumber} <span class="status-badge ${statusClass}" style="margin-left: 12px; font-size: 12px; vertical-align: middle; padding: 4px 8px;">${statusText}</span>`;
+
+    const dateStr = formatUserFriendlyDateTime(entry.date, entry.time);
+    let html = `
+      <div style="margin-bottom: 16px; line-height: 1.5; color: var(--color-graphite); font-size: 15px;">
+        <div style="font-weight: 700; color: var(--color-almost-black); font-size: 17px;">${escapeHtml(entry.customerName)}</div>
+        <div>${escapeHtml(entry.customerMobile)}</div>
+        <div style="color: var(--color-silver); font-size: 13px;">${escapeHtml(dateStr)}</div>
+        ${entry.invoiceMessage ? `<div style="margin-top: 8px; font-style: italic; color: var(--color-graphite);">${escapeHtml(entry.invoiceMessage)}</div>` : ''}
+      </div>
+    `;
+
+    html += this.renderEntryDetails(entry);
+    html += this.renderBatchActionBar(entry);
+
+    document.getElementById('invoice-details-body').innerHTML = html;
+  },
+
+  renderBatchActionBar(entry) {
+    const changeCount = Object.keys(AppState.pendingStatusChanges).length;
+    if (changeCount === 0) return '';
+
+    return `
+      <div class="batch-action-bar">
+        <div class="batch-action-text">
+          Pending updates: <span class="batch-action-count">${changeCount}</span>
+        </div>
+        <button class="btn btn-success btn-sm" onclick="Entries.saveBatchChangesAndSendWhatsApp('${escapeHtml(entry.invoiceNumber)}')">
+          Save Changes & Send WhatsApp
+        </button>
+      </div>
+    `;
+  },
+
+  async saveBatchChangesAndSendWhatsApp(invoiceNumber) {
+    const entry = AppState.entries.find(e => e.invoiceNumber === invoiceNumber);
+    if (!entry) return;
+
+    const keys = Object.keys(AppState.pendingStatusChanges);
+    if (keys.length === 0) return;
+
+    // Pre-open window inside user gesture block to prevent popup blocker blocking it
+    const customerMobile = entry.customerMobile || entry.mobileNumber || '';
+    const cleanedMobile = String(customerMobile).replace(/\D/g, '');
+    let waWindow = null;
+    if (cleanedMobile.length === 10) {
+      waWindow = window.open('', '_blank');
+    }
+
+    showLoading();
+    const updatedItemsSummary = [];
+
+    try {
+      for (const key of keys) {
+        const [studentIndex, itemIndex] = key.split('-').map(Number);
+        const newStatus = AppState.pendingStatusChanges[key];
+        
+        const student = entry.students[studentIndex];
+        const item = student.items[itemIndex];
+
+        const result = await API.post('updateItemStatus', {
+          invoiceNumber,
+          studentIndex,
+          itemIndex,
+          newStatus,
+        });
+
+        if (result && result.success) {
+          item.status = newStatus;
+          const statusLabel = this.getItemStatusLabel(newStatus);
+          updatedItemsSummary.push(`- ${item.name} (${student.className}): ${statusLabel}`);
+        }
+      }
+
+      AppState.pendingStatusChanges = {};
+      showToast('Changes saved successfully!', 'success');
+
+      if (updatedItemsSummary.length > 0 && waWindow) {
+        const customerName = entry.customerName || 'Customer';
+        let messageText = `*Shyam Book Depot*\n`;
+        messageText += `Invoice Update: ${invoiceNumber}\n`;
+        messageText += `Customer: ${customerName}\n\n`;
+        messageText += `Dear Customer, the status of your item(s) has been updated:\n\n`;
+        messageText += updatedItemsSummary.join('\n') + `\n\n`;
+        messageText += `Thank you!`;
+
+        const waUrl = `https://api.whatsapp.com/send?phone=91${cleanedMobile}&text=${encodeURIComponent(messageText)}`;
+        waWindow.location.href = waUrl;
+      } else if (waWindow) {
+        waWindow.close();
+      }
+    } catch (err) {
+      console.error(err);
+      if (waWindow) waWindow.close();
+      showToast('Error saving changes: ' + err.message, 'danger');
+    } finally {
+      hideLoading();
+      this.refreshDetailsModal(invoiceNumber);
+      this.applyFiltersAndSearch();
+    }
   },
 
   async updateItemStatus(invoiceNumber, studentIndex, itemIndex, newStatus) {
@@ -1584,7 +1782,6 @@ const Entries = {
     });
 
     if (result && result.success) {
-      // Update local state
       const entry = AppState.entries.find(
         (e) => e.invoiceNumber === invoiceNumber
       );
@@ -1593,12 +1790,7 @@ const Entries = {
       }
 
       this.applyFiltersAndSearch();
-
-      // Dynamically re-render details in the open modal to update UI reactively
-      if (entry) {
-        document.getElementById('invoice-details-body').innerHTML = this.renderEntryDetails(entry);
-      }
-
+      this.refreshDetailsModal(invoiceNumber);
       showToast('Status updated successfully', 'success');
     }
   },
