@@ -68,6 +68,7 @@ const AppState = {
   activeModalStudentIndex: 0,
   activeModalCategoryTabs: {}, // Map of studentIndex -> tabId
   pendingStatusChanges: {},    // Map of "studentIndex-itemIndex" -> newStatus
+  nowAvailableSelections: {},  // Map of "studentIndex-itemIndex" -> boolean
   // Admin state
   isAdminLoggedIn: false,
   adminUsername: '',
@@ -78,6 +79,7 @@ const AppState = {
     books: [],
     notebooks: [],
   },
+  cashiers: [],
 };
 
 // ============================================
@@ -1081,6 +1083,7 @@ const Invoice = {
     document.getElementById('checkout-mobile').value = '';
     document.getElementById('checkout-name').value = '';
     document.getElementById('checkout-message').value = '';
+    document.getElementById('checkout-cashier').value = '';
 
     Modal.show('modal-checkout');
   },
@@ -1089,6 +1092,8 @@ const Invoice = {
     const mobile = document.getElementById('checkout-mobile').value.trim();
     const name = document.getElementById('checkout-name').value.trim();
     const message = document.getElementById('checkout-message').value.trim();
+    const cashierName = document.getElementById('checkout-cashier').value;
+    const lang = document.getElementById('checkout-language').value || 'en';
 
     if (!mobile || !/^\d{10}$/.test(mobile)) {
       showToast('Please enter exactly 10 numeric digits for the mobile number', 'error');
@@ -1098,6 +1103,23 @@ const Invoice = {
     if (!name) {
       showToast('Please enter customer name', 'error');
       return;
+    }
+
+    if (!cashierName) {
+      showToast('Please select a cashier', 'error');
+      return;
+    }
+
+    const cleanedMobile = String(mobile).replace(/\D/g, '');
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    
+    let waWindow = null;
+    if (cleanedMobile.length === 10 && !isMobile) {
+      try {
+        waWindow = window.open('', '_blank');
+      } catch (e) {
+        console.warn('Failed to pre-open window on desktop', e);
+      }
     }
 
     const now = new Date();
@@ -1132,15 +1154,19 @@ const Invoice = {
       };
     });
 
+    const cashierMessage = message ? `${message} (Cashier: ${cashierName})` : `(Cashier: ${cashierName})`;
+
+    showLoading();
     // Match code.gs createInvoice expected fields
     const result = await API.post('createInvoice', {
       mobileNumber: mobile,
       customerName: name,
       date: dateStr,
       time: timeStr,
-      invoiceMessage: message,
+      invoiceMessage: cashierMessage,
       students: studentsData,
     });
+    hideLoading();
 
     if (result && result.success) {
       const invNum = result.data ? result.data.invoiceNumber : '';
@@ -1149,9 +1175,10 @@ const Invoice = {
 
       // Send WhatsApp message for all pending books
       try {
-        this.sendNewInvoiceWhatsAppNotification(invNum, name, mobile, studentsData);
+        this.sendNewEntryWhatsApp(invNum, name, mobile, studentsData, cashierName, lang, waWindow);
       } catch (waErr) {
         console.error('Error triggering WhatsApp notification:', waErr);
+        if (waWindow) waWindow.close();
       }
 
       this.reset();
@@ -1159,52 +1186,43 @@ const Invoice = {
       // Go back to school selection
       document.getElementById('invoice-view').classList.add('hidden');
       document.getElementById('school-selection').classList.remove('hidden');
+    } else {
+      if (waWindow) waWindow.close();
     }
   },
 
-  sendNewInvoiceWhatsAppNotification(invNum, customerName, mobile, studentsData) {
-    const pendingItemsByStudent = [];
+  sendNewEntryWhatsApp(entryNumber, customerName, mobile, studentsData, cashierName, lang, waWindow) {
+    const pendingStudents = [];
 
-    studentsData.forEach((student, sIndex) => {
-      const pendingForThisStudent = student.items.filter(item => Number(item.status) === 1);
-      if (pendingForThisStudent.length > 0) {
-        pendingItemsByStudent.push({
-          studentIndex: sIndex + 1,
-          className: student.className,
-          schoolName: student.schoolName,
-          items: pendingForThisStudent
-        });
+    studentsData.forEach((student) => {
+      const pendingItems = student.items.filter(item => Number(item.status) === 1);
+      if (pendingItems.length > 0) {
+        pendingStudents.push({ className: student.className, items: pendingItems });
       }
     });
 
-    if (pendingItemsByStudent.length === 0) {
-      return; // No pending items
+    if (pendingStudents.length === 0) {
+      if (waWindow) waWindow.close();
+      return;
     }
 
-    let messageText = `*Shyam Book Depot*\n`;
-    messageText += `Invoice: ${invNum}\n`;
-    messageText += `Customer: ${customerName}\n\n`;
-    messageText += `Dear Customer, the following items are currently pending and will be delivered soon:\n\n`;
-
-    pendingItemsByStudent.forEach(s => {
-      messageText += `*Student ${s.studentIndex} (${s.className})*\n`;
-      const countMap = {};
-      s.items.forEach(item => {
-        countMap[item.name] = (countMap[item.name] || 0) + 1;
-      });
-
-      Object.entries(countMap).forEach(([itemName, qty]) => {
-        messageText += `- ${itemName} x${qty}\n`;
-      });
-      messageText += `\n`;
+    const messageText = WhatsAppTemplates.pendingItems(lang, {
+      customerName,
+      entryNumber,
+      students: pendingStudents,
+      cashierName
     });
-
-    messageText += `We will notify you once they are ready. Thank you!`;
 
     const cleanedMobile = String(mobile).replace(/\D/g, '');
     if (cleanedMobile.length === 10) {
       const waUrl = `https://api.whatsapp.com/send?phone=91${cleanedMobile}&text=${encodeURIComponent(messageText)}`;
-      window.open(waUrl, '_blank');
+      if (waWindow) {
+        waWindow.location.href = waUrl;
+      } else {
+        window.location.href = waUrl;
+      }
+    } else {
+      if (waWindow) waWindow.close();
     }
   },
 
@@ -1388,6 +1406,7 @@ const Entries = {
     AppState.activeModalStudentIndex = 0;
     AppState.activeModalCategoryTabs = {};
     AppState.pendingStatusChanges = {};
+    AppState.nowAvailableSelections = {};
 
     const statusClass = this.getInvoiceStatus(entry.students);
     const statusText = statusClass.toUpperCase();
@@ -1449,6 +1468,24 @@ const Entries = {
       // Get active category tab (default: 'books')
       const activeCategoryTab = AppState.activeModalCategoryTabs[sIndex] || 'books';
 
+      // Find pending items in active category to render Select All inline
+      const activeItemsList = activeCategoryTab === 'books' ? books : (activeCategoryTab === 'notebooks' ? notebooks : customItems);
+      const pendingActiveItems = activeItemsList.filter(item => item.status === 1);
+      const hasPendingItems = pendingActiveItems.length > 0;
+      
+      let selectAllButtonHtml = '';
+      if (hasPendingItems) {
+        const pendingIndices = pendingActiveItems.map(item => student.items.findIndex(x => x === item));
+        const allSelected = pendingIndices.every(idx => AppState.nowAvailableSelections[`${sIndex}-${idx}`] === true);
+        const btnText = allSelected ? 'Deselect All Pending' : 'Select All Pending';
+        
+        selectAllButtonHtml = `
+          <button class="btn btn-secondary btn-sm" style="text-transform: none; border-radius: 8px; font-size: 12px; padding: 4px 10px; margin: 8px 12px;" onclick="Entries.toggleSelectAllPending('${escapeHtml(entry.invoiceNumber)}', ${sIndex}, [${pendingIndices.join(',')}], ${!allSelected})">
+            ${btnText}
+          </button>
+        `;
+      }
+
       html += `
         <div class="entry-student-section catalog-tab-content ${activeStudentClass}" data-student-index="${sIndex}">
           <div class="entry-student-header" style="margin-bottom: 12px; font-weight: 700; color: var(--color-charcoal); font-size: 13px;">
@@ -1456,16 +1493,19 @@ const Entries = {
           </div>
 
           <!-- Secondary Category Tabs inside each Student -->
-          <div class="catalog-tabs" style="margin-bottom: 16px; gap: 8px;">
-            <button class="catalog-tab ${activeCategoryTab === 'books' ? 'active' : ''}" data-tab="books" onclick="Entries.switchModalCategoryTab(${sIndex}, 'books')">
-              Books <span class="tab-badge">${books.length}</span>
-            </button>
-            <button class="catalog-tab ${activeCategoryTab === 'notebooks' ? 'active' : ''}" data-tab="notebooks" onclick="Entries.switchModalCategoryTab(${sIndex}, 'notebooks')">
-              Notebooks <span class="tab-badge">${notebooks.length}</span>
-            </button>
-            <button class="catalog-tab ${activeCategoryTab === 'others' ? 'active' : ''}" data-tab="others" onclick="Entries.switchModalCategoryTab(${sIndex}, 'others')">
-              Custom <span class="tab-badge">${customItems.length}</span>
-            </button>
+          <div class="catalog-tabs-wrapper" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; border-bottom: 2px solid var(--theme-border); padding-bottom: 8px;">
+            <div class="catalog-tabs" style="display: flex; gap: 8px; margin-bottom: 0; border: none; padding-bottom: 0;">
+              <button class="catalog-tab ${activeCategoryTab === 'books' ? 'active' : ''}" data-tab="books" onclick="Entries.switchModalCategoryTab(${sIndex}, 'books')">
+                Books <span class="tab-badge">${books.length}</span>
+              </button>
+              <button class="catalog-tab ${activeCategoryTab === 'notebooks' ? 'active' : ''}" data-tab="notebooks" onclick="Entries.switchModalCategoryTab(${sIndex}, 'notebooks')">
+                Notebooks <span class="tab-badge">${notebooks.length}</span>
+              </button>
+              <button class="catalog-tab ${activeCategoryTab === 'others' ? 'active' : ''}" data-tab="others" onclick="Entries.switchModalCategoryTab(${sIndex}, 'others')">
+                Custom <span class="tab-badge">${customItems.length}</span>
+              </button>
+            </div>
+            ${selectAllButtonHtml}
           </div>
 
           <!-- Category Contents -->
@@ -1498,24 +1538,35 @@ const Entries = {
     }
 
     let html = '';
+
     filteredItems.forEach((item) => {
-      // Find the index of this item in the original allItems array to pass to renderItemActions
       const iIndex = allItems.findIndex(x => x === item);
 
       const itemStatus = this.getItemStatusLabel(item.status);
       const itemStatusClass = this.getItemStatusClass(item.status);
 
+      const key = `${studentIndex}-${iIndex}`;
+      const isChecked = AppState.nowAvailableSelections[key] === true ? 'checked' : '';
+      const checkboxHtml = item.status === 1 ? `
+        <div class="entry-item-checkbox-wrapper" style="flex-shrink: 0; margin-right: 8px;">
+          <input type="checkbox" class="now-available-cb" ${isChecked} onchange="Entries.toggleNowAvailableSelection('${escapeHtml(invoiceNumber)}', ${studentIndex}, ${iIndex}, this.checked)">
+        </div>
+      ` : '';
+
       html += `
         <div class="entry-item">
-          <div class="entry-item-info">
-            <div class="entry-item-name-row">
-              <span class="entry-item-name">${escapeHtml(item.name)}</span>
-              <span class="entry-item-qty">x${item.quantity}</span>
-              <span class="status-badge ${itemStatusClass} status-badge-compact">${itemStatus}</span>
-            </div>
-            <div class="entry-item-meta-row">
-              <span class="entry-item-price">Total: ${formatCurrency(item.sellingPrice * item.quantity)}</span>
-              ${item.message ? `<span class="entry-item-note-inline">Note: ${escapeHtml(item.message)}</span>` : ''}
+          <div class="entry-item-left" style="display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; width: 100%;">
+            ${checkboxHtml}
+            <div class="entry-item-info" style="flex: 1; min-width: 0;">
+              <div class="entry-item-name-row" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <span class="entry-item-name" style="font-weight: 700; font-size: 15px; color: var(--theme-text-primary);">${escapeHtml(item.name)}</span>
+                <span class="entry-item-qty">x${item.quantity}</span>
+                <span class="status-badge ${itemStatusClass} status-badge-compact">${itemStatus}</span>
+              </div>
+              <div class="entry-item-meta-row">
+                <span class="entry-item-price">Total: ${formatCurrency(item.sellingPrice * item.quantity)}</span>
+                ${item.message ? `<span class="entry-item-note-inline">Note: ${escapeHtml(item.message)}</span>` : ''}
+              </div>
             </div>
           </div>
           <div class="entry-item-actions">
@@ -1668,6 +1719,28 @@ const Entries = {
     this.refreshDetailsModal(invoiceNumber);
   },
 
+  toggleNowAvailableSelection(invoiceNumber, studentIndex, itemIndex, isChecked) {
+    const key = `${studentIndex}-${itemIndex}`;
+    if (isChecked) {
+      AppState.nowAvailableSelections[key] = true;
+    } else {
+      delete AppState.nowAvailableSelections[key];
+    }
+    this.refreshDetailsModal(invoiceNumber);
+  },
+
+  toggleSelectAllPending(invoiceNumber, studentIndex, pendingIndices, shouldSelect) {
+    pendingIndices.forEach(idx => {
+      const key = `${studentIndex}-${idx}`;
+      if (shouldSelect) {
+        AppState.nowAvailableSelections[key] = true;
+      } else {
+        delete AppState.nowAvailableSelections[key];
+      }
+    });
+    this.refreshDetailsModal(invoiceNumber);
+  },
+
   refreshDetailsModal(invoiceNumber) {
     const entry = AppState.entries.find(e => e.invoiceNumber === invoiceNumber);
     if (!entry) return;
@@ -1695,23 +1768,139 @@ const Entries = {
 
   renderBatchActionBar(entry) {
     const changeCount = Object.keys(AppState.pendingStatusChanges).length;
-    if (changeCount === 0) return '';
+    const availableCount = Object.keys(AppState.nowAvailableSelections).length;
 
-    return `
-      <div class="batch-action-bar">
-        <div class="batch-action-text">
-          Pending updates: <span class="batch-action-count">${changeCount}</span>
+    if (changeCount === 0 && availableCount === 0) return '';
+
+    let cashierOptions = '<option value="">-- Select Cashier --</option>';
+    (AppState.cashiers || []).forEach(name => {
+      cashierOptions += `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`;
+    });
+
+    const selectStyle = 'width: 100%; border: 2px solid var(--theme-border); border-radius: var(--radius-inputs); padding: 8px 12px; font-weight: 600; background: var(--theme-bg); color: var(--theme-text-primary);';
+
+    const controlsHtml = `
+      <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+        <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 140px; text-align: left;">
+          <label style="font-weight: 700; font-size: 13px; color: var(--theme-text-primary);">Cashier *</label>
+          <select class="operation-cashier" style="${selectStyle}">
+            ${cashierOptions}
+          </select>
         </div>
-        <button class="btn btn-success btn-sm" onclick="Entries.saveBatchChangesAndSendWhatsApp('${escapeHtml(entry.invoiceNumber)}')">
-          Save Changes & Send WhatsApp
-        </button>
+        <div class="form-group" style="margin-bottom: 0; min-width: 120px; text-align: left;">
+          <label style="font-weight: 700; font-size: 13px; color: var(--theme-text-primary);">Language</label>
+          <select class="operation-language" style="${selectStyle}">
+            <option value="en">English</option>
+            <option value="hi">Hindi</option>
+          </select>
+        </div>
       </div>
     `;
+
+    let html = '<div style="display: flex; flex-direction: column; gap: 12px; margin-top: 16px; margin-bottom: 16px; border-top: 2px dashed var(--theme-border); padding-top: 16px;">';
+    html += controlsHtml;
+
+    if (changeCount > 0) {
+      html += `
+        <div class="batch-action-bar" style="margin: 0;">
+          <div class="batch-action-text">
+            Pending updates: <span class="batch-action-count">${changeCount}</span>
+          </div>
+          <button class="btn btn-success btn-sm" onclick="Entries.saveBatchChangesAndSendWhatsApp('${escapeHtml(entry.invoiceNumber)}')">
+            Save Changes & Send WhatsApp
+          </button>
+        </div>
+      `;
+    }
+
+    if (availableCount > 0) {
+      html += `
+        <div class="batch-action-bar" style="margin: 0; border-color: var(--color-sky-blue); box-shadow: 0 4px 0 rgba(28, 176, 246, 0.15);">
+          <div class="batch-action-text">
+            Selected for Available Alert: <span class="batch-action-count" style="background-color: var(--color-sky-blue);">${availableCount}</span>
+          </div>
+          <button class="btn btn-info btn-sm" onclick="Entries.sendNowAvailableWhatsApp('${escapeHtml(entry.invoiceNumber)}')">
+            Now Available Message
+          </button>
+        </div>
+      `;
+    }
+
+    html += '</div>';
+    return html;
+  },
+
+  sendNowAvailableWhatsApp(invoiceNumber) {
+    const entry = AppState.entries.find(e => e.invoiceNumber === invoiceNumber);
+    if (!entry) return;
+
+    const cashierSelect = document.querySelector('.operation-cashier');
+    const cashierName = cashierSelect ? cashierSelect.value : '';
+    if (!cashierName) {
+      showToast('Please select a cashier first!', 'error');
+      return;
+    }
+
+    const langSelect = document.querySelector('.operation-language');
+    const lang = langSelect ? langSelect.value : 'en';
+
+    const keys = Object.keys(AppState.nowAvailableSelections);
+    if (keys.length === 0) return;
+
+    const customerMobile = entry.customerMobile || entry.mobileNumber || '';
+    const cleanedMobile = String(customerMobile).replace(/\D/g, '');
+
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    const itemsByStudent = {};
+
+    keys.forEach(key => {
+      const [studentIndex, itemIndex] = key.split('-').map(Number);
+      const student = entry.students[studentIndex];
+      const item = student.items[itemIndex];
+
+      if (!itemsByStudent[studentIndex]) {
+        itemsByStudent[studentIndex] = {
+          className: student.className,
+          items: []
+        };
+      }
+      itemsByStudent[studentIndex].items.push(item);
+    });
+
+    AppState.nowAvailableSelections = {};
+
+    const customerName = entry.customerName || 'Customer';
+    const messageText = WhatsAppTemplates.nowAvailable(lang, {
+      customerName,
+      entryNumber: invoiceNumber,
+      students: Object.values(itemsByStudent),
+      cashierName
+    });
+
+    const waUrl = `https://api.whatsapp.com/send?phone=91${cleanedMobile}&text=${encodeURIComponent(messageText)}`;
+
+    if (isMobile) {
+      window.location.href = waUrl;
+    } else {
+      window.open(waUrl, '_blank');
+    }
+
+    this.refreshDetailsModal(invoiceNumber);
   },
 
   async saveBatchChangesAndSendWhatsApp(invoiceNumber) {
     const entry = AppState.entries.find(e => e.invoiceNumber === invoiceNumber);
     if (!entry) return;
+
+    const cashierSelect = document.querySelector('.operation-cashier');
+    const cashierName = cashierSelect ? cashierSelect.value : '';
+    if (!cashierName) {
+      showToast('Please select a cashier first!', 'error');
+      return;
+    }
+
+    const langSelect = document.querySelector('.operation-language');
+    const lang = langSelect ? langSelect.value : 'en';
 
     const keys = Object.keys(AppState.pendingStatusChanges);
     if (keys.length === 0) return;
@@ -1719,10 +1908,8 @@ const Entries = {
     const customerMobile = entry.customerMobile || entry.mobileNumber || '';
     const cleanedMobile = String(customerMobile).replace(/\D/g, '');
 
-    // Mobile device detection
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
     
-    // Pre-open window only on desktop. On mobile, we redirect the current window to open the native WhatsApp app seamlessly.
     let waWindow = null;
     if (cleanedMobile.length === 10 && !isMobile) {
       try {
@@ -1733,7 +1920,7 @@ const Entries = {
     }
 
     showLoading();
-    const updatedItemsSummary = [];
+    const updatedItems = [];
 
     try {
       for (const key of keys) {
@@ -1752,28 +1939,29 @@ const Entries = {
 
         if (result && result.success) {
           item.status = newStatus;
-          const statusLabel = this.getItemStatusLabel(newStatus);
-          updatedItemsSummary.push(`- ${item.name} (${student.className}): ${statusLabel}`);
+          updatedItems.push({
+            name: item.name,
+            statusLabel: WhatsAppTemplates.getStatusLabel(lang, newStatus)
+          });
         }
       }
 
       AppState.pendingStatusChanges = {};
       showToast('Changes saved successfully!', 'success');
 
-      if (updatedItemsSummary.length > 0) {
+      if (updatedItems.length > 0) {
         const customerName = entry.customerName || 'Customer';
-        let messageText = `*Shyam Book Depot*\n`;
-        messageText += `Invoice Update: ${invoiceNumber}\n`;
-        messageText += `Customer: ${customerName}\n\n`;
-        messageText += `Dear Customer, the status of your item(s) has been updated:\n\n`;
-        messageText += updatedItemsSummary.join('\n') + `\n\n`;
-        messageText += `Thank you!`;
+        const messageText = WhatsAppTemplates.statusUpdate(lang, {
+          customerName,
+          entryNumber: invoiceNumber,
+          items: updatedItems,
+          cashierName
+        });
 
         const waUrl = `https://api.whatsapp.com/send?phone=91${cleanedMobile}&text=${encodeURIComponent(messageText)}`;
         if (waWindow) {
           waWindow.location.href = waUrl;
         } else {
-          // On mobile, redirect the current window to WhatsApp (no popup blocker can block this)
           window.location.href = waUrl;
         }
       } else if (waWindow) {
@@ -1965,6 +2153,8 @@ const Admin = {
     if (newUsernameInput) newUsernameInput.value = '';
     if (newPasswordInput) newPasswordInput.value = '';
     if (confirmPasswordInput) confirmPasswordInput.value = '';
+
+    Cashier.renderAdminList();
   },
 
   async updateSettings() {
@@ -2716,6 +2906,178 @@ const Modal = {
 };
 
 // ============================================
+// WHATSAPP MESSAGE TEMPLATES (EN / HI)
+// ============================================
+const WhatsAppTemplates = {
+  pendingItems(lang, { customerName, entryNumber, students, cashierName }) {
+    const itemsBlock = students.map(s => {
+      const countMap = {};
+      s.items.forEach(item => { countMap[item.name] = (countMap[item.name] || 0) + 1; });
+      const lines = Object.entries(countMap).map(([name, qty]) => `  • ${name} × ${qty}`).join('\n');
+      return `📚 *${s.className}*\n${lines}`;
+    }).join('\n\n');
+
+    if (lang === 'hi') {
+      return `🙏 *श्याम बुक डिपो*\n\n`
+        + `नमस्ते ${customerName} जी,\n\n`
+        + `आपका ऑर्डर सफलतापूर्वक दर्ज हो गया है। (Entry #${entryNumber})\n\n`
+        + `नीचे दी गई किताबें/सामान अभी उपलब्ध नहीं हैं और जल्द ही तैयार होने पर आपको सूचित किया जाएगा:\n\n`
+        + `${itemsBlock}\n\n`
+        + `कृपया इन्हें लेने से पहले हमारा संदेश आने तक प्रतीक्षा करें।\n\n`
+        + `धन्यवाद!\n`
+        + `— ${cashierName}, श्याम बुक डिपो`;
+    }
+
+    return `🙏 *Shyam Book Depot*\n\n`
+      + `Hello ${customerName},\n\n`
+      + `Your order has been placed successfully. (Entry #${entryNumber})\n\n`
+      + `The following items are currently not available and will be kept aside for you once ready:\n\n`
+      + `${itemsBlock}\n\n`
+      + `Please wait for our message before coming to collect them.\n\n`
+      + `Thank you!\n`
+      + `— ${cashierName}, Shyam Book Depot`;
+  },
+
+  statusUpdate(lang, { customerName, entryNumber, items, cashierName }) {
+    const itemLines = items.map(i => `  • ${i.name} → ${i.statusLabel}`).join('\n');
+
+    if (lang === 'hi') {
+      return `🙏 *श्याम बुक डिपो*\n\n`
+        + `नमस्ते ${customerName} जी,\n\n`
+        + `आपके ऑर्डर (Entry #${entryNumber}) में निम्न बदलाव किये गये हैं:\n\n`
+        + `${itemLines}\n\n`
+        + `किसी भी जानकारी के लिए हमसे संपर्क करें।\n\n`
+        + `धन्यवाद!\n`
+        + `— ${cashierName}, श्याम बुक डिपो`;
+    }
+
+    return `🙏 *Shyam Book Depot*\n\n`
+      + `Hello ${customerName},\n\n`
+      + `The following changes have been made to your order (Entry #${entryNumber}):\n\n`
+      + `${itemLines}\n\n`
+      + `Please contact us if you have any questions.\n\n`
+      + `Thank you!\n`
+      + `— ${cashierName}, Shyam Book Depot`;
+  },
+
+  nowAvailable(lang, { customerName, entryNumber, students, cashierName }) {
+    const itemsBlock = students.map(s => {
+      const countMap = {};
+      s.items.forEach(item => { countMap[item.name] = (countMap[item.name] || 0) + 1; });
+      const lines = Object.entries(countMap).map(([name, qty]) => `  • ${name} × ${qty}`).join('\n');
+      return `📚 *${s.className}*\n${lines}`;
+    }).join('\n\n');
+
+    if (lang === 'hi') {
+      return `🙏 *श्याम बुक डिपो*\n\n`
+        + `नमस्ते ${customerName} जी,\n\n`
+        + `खुशखबरी! आपके ऑर्डर (Entry #${entryNumber}) की नीचे दी गई चीज़ें अब उपलब्ध हो गई हैं:\n\n`
+        + `${itemsBlock}\n\n`
+        + `कृपया जल्द से जल्द इन्हें लेने आएँ।\n\n`
+        + `धन्यवाद!\n`
+        + `— ${cashierName}, श्याम बुक डिपो`;
+    }
+
+    return `🙏 *Shyam Book Depot*\n\n`
+      + `Hello ${customerName},\n\n`
+      + `Great news! The following items from your order (Entry #${entryNumber}) are now available:\n\n`
+      + `${itemsBlock}\n\n`
+      + `Please visit us at your earliest convenience to collect them.\n\n`
+      + `Thank you!\n`
+      + `— ${cashierName}, Shyam Book Depot`;
+  },
+
+  getStatusLabel(lang, status) {
+    const labels = {
+      en: { 0: 'Delivered ✅', 1: 'Pending ⏳', 2: 'Returned ↩️', 3: 'Cancelled ❌' },
+      hi: { 0: 'दे दिया गया ✅', 1: 'बाकी है ⏳', 2: 'वापस किया ↩️', 3: 'रद्द किया ❌' }
+    };
+    return (labels[lang] || labels['en'])[status] || String(status);
+  }
+};
+
+// ============================================
+// CASHIER MANAGEMENT MODULE
+// ============================================
+const Cashier = {
+  async load() {
+    const res = await API.get('getCashiers');
+    if (res && res.success && res.data) {
+      AppState.cashiers = res.data;
+    } else {
+      AppState.cashiers = [];
+    }
+    this.populateDropdowns();
+  },
+
+  populateDropdowns() {
+    const checkoutSelect = document.getElementById('checkout-cashier');
+    if (checkoutSelect) {
+      checkoutSelect.innerHTML = '<option value="">-- Select Cashier --</option>';
+      (AppState.cashiers || []).forEach(name => {
+        checkoutSelect.innerHTML += `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`;
+      });
+    }
+
+    const opSelects = document.querySelectorAll('.operation-cashier');
+    opSelects.forEach(select => {
+      const currentVal = select.value;
+      select.innerHTML = '<option value="">-- Select Cashier --</option>';
+      (AppState.cashiers || []).forEach(name => {
+        select.innerHTML += `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`;
+      });
+      select.value = currentVal;
+    });
+  },
+
+  renderAdminList() {
+    const listContainer = document.getElementById('admin-cashiers-list');
+    if (!listContainer) return;
+    
+    if (!AppState.cashiers || AppState.cashiers.length === 0) {
+      listContainer.innerHTML = '<p class="text-muted text-center" style="font-size: 0.85rem; padding: 12px; margin: 0;">No cashiers added yet.</p>';
+      return;
+    }
+
+    listContainer.innerHTML = AppState.cashiers.map((name, index) => `
+      <div class="cashier-list-item">
+        <span>${escapeHtml(name)}</span>
+        <button class="cashier-remove-btn" onclick="Cashier.remove(${index})">&times;</button>
+      </div>
+    `).join('');
+  },
+
+  add(name) {
+    name = name.trim();
+    if (!name) return;
+    if (AppState.cashiers.includes(name)) {
+      showToast('Cashier already exists', 'error');
+      return;
+    }
+    AppState.cashiers.push(name);
+    this.renderAdminList();
+    this.populateDropdowns();
+  },
+
+  remove(index) {
+    AppState.cashiers.splice(index, 1);
+    this.renderAdminList();
+    this.populateDropdowns();
+  },
+
+  async save() {
+    showLoading();
+    const res = await API.post('updateCashiers', { cashiers: AppState.cashiers });
+    hideLoading();
+    if (res && res.success) {
+      showToast('Cashiers list saved successfully!', 'success');
+    } else {
+      showToast('Failed to save cashiers list', 'danger');
+    }
+  }
+};
+
+// ============================================
 // EVENT LISTENERS & INITIALIZATION
 // ============================================
 document.addEventListener('DOMContentLoaded', () => {
@@ -2837,6 +3199,25 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // --- Cashier Manager ---
+  const btnAddCashier = document.getElementById('btn-add-cashier');
+  if (btnAddCashier) {
+    btnAddCashier.addEventListener('click', () => {
+      const input = document.getElementById('new-cashier-name');
+      if (input) {
+        Cashier.add(input.value);
+        input.value = '';
+      }
+    });
+  }
+
+  const btnSaveCashiers = document.getElementById('btn-save-cashiers');
+  if (btnSaveCashiers) {
+    btnSaveCashiers.addEventListener('click', () => {
+      Cashier.save();
+    });
+  }
+
   // --- Admin Modal ---
   document.getElementById('btn-cancel-admin').addEventListener('click', () => {
     Modal.hide('modal-admin');
@@ -2896,5 +3277,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // --- Initialize ---
+  Cashier.load();
   Router.navigate('home');
 });
