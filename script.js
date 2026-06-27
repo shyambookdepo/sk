@@ -1652,7 +1652,11 @@ const Entries = {
 
   handleActionClick(event, invoiceNumber, studentIndex, itemIndex, newStatus) {
     const key = `${studentIndex}-${itemIndex}`;
-    AppState.pendingStatusChanges[key] = newStatus;
+    if (AppState.pendingStatusChanges[key] === newStatus) {
+      delete AppState.pendingStatusChanges[key];
+    } else {
+      AppState.pendingStatusChanges[key] = newStatus;
+    }
     this.refreshDetailsModal(invoiceNumber);
   },
 
@@ -1712,12 +1716,20 @@ const Entries = {
     const keys = Object.keys(AppState.pendingStatusChanges);
     if (keys.length === 0) return;
 
-    // Pre-open window inside user gesture block to prevent popup blocker blocking it
     const customerMobile = entry.customerMobile || entry.mobileNumber || '';
     const cleanedMobile = String(customerMobile).replace(/\D/g, '');
+
+    // Mobile device detection
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    
+    // Pre-open window only on desktop. On mobile, we redirect the current window to open the native WhatsApp app seamlessly.
     let waWindow = null;
-    if (cleanedMobile.length === 10) {
-      waWindow = window.open('', '_blank');
+    if (cleanedMobile.length === 10 && !isMobile) {
+      try {
+        waWindow = window.open('', '_blank');
+      } catch (e) {
+        console.warn('Failed to pre-open window on desktop', e);
+      }
     }
 
     showLoading();
@@ -1748,7 +1760,7 @@ const Entries = {
       AppState.pendingStatusChanges = {};
       showToast('Changes saved successfully!', 'success');
 
-      if (updatedItemsSummary.length > 0 && waWindow) {
+      if (updatedItemsSummary.length > 0) {
         const customerName = entry.customerName || 'Customer';
         let messageText = `*Shyam Book Depot*\n`;
         messageText += `Invoice Update: ${invoiceNumber}\n`;
@@ -1758,7 +1770,12 @@ const Entries = {
         messageText += `Thank you!`;
 
         const waUrl = `https://api.whatsapp.com/send?phone=91${cleanedMobile}&text=${encodeURIComponent(messageText)}`;
-        waWindow.location.href = waUrl;
+        if (waWindow) {
+          waWindow.location.href = waUrl;
+        } else {
+          // On mobile, redirect the current window to WhatsApp (no popup blocker can block this)
+          window.location.href = waUrl;
+        }
       } else if (waWindow) {
         waWindow.close();
       }
