@@ -2292,3 +2292,53 @@ input, select, textarea {
   }
 }
 
+/* ============================================
+   19. NOW AVAILABLE SELECTION CHECKBOX
+   ============================================ */
+.entry-item-checkbox-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 4px;
+}
+
+.now-available-cb {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: var(--color-duo-green);
+}
+
+/* ============================================
+   20. CASHIER MANAGEMENT STYLES
+   ============================================ */
+.cashier-list-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--theme-border);
+  font-weight: 600;
+  color: var(--theme-text-primary);
+}
+
+.cashier-list-item:last-child {
+  border-bottom: none;
+}
+
+.cashier-remove-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-danger);
+  font-weight: bold;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 8px;
+  transition: transform 0.1s;
+}
+
+.cashier-remove-btn:active {
+  transform: scale(0.9);
+}
+
+
