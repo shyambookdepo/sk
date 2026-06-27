@@ -187,8 +187,9 @@
           <div id="admin-books" class="admin-panel hidden"></div>
           <div id="admin-notebooks" class="admin-panel hidden"></div>
           <div id="admin-settings" class="admin-panel hidden">
-            <div style="display: flex; justify-content: center; align-items: center; padding: 20px 0;">
-              <div class="login-card">
+            <div style="display: flex; flex-direction: column; gap: 24px; align-items: center; padding: 20px 0;">
+              <!-- Credentials Card -->
+              <div class="login-card" style="width: 100%; max-width: 450px;">
                 <h3 class="text-center" style="margin-bottom: 24px;">⚙️ Update Credentials</h3>
                 <form id="form-admin-settings" onsubmit="event.preventDefault();">
                   <div class="form-group">
@@ -209,6 +210,25 @@
                   </div>
                   <button type="submit" id="btn-update-settings" class="btn btn-primary btn-lg btn-full" style="margin-top: 10px;">Update Credentials</button>
                 </form>
+              </div>
+
+              <!-- Cashiers Card -->
+              <div class="login-card" style="width: 100%; max-width: 450px; margin-top: 10px;">
+                <h3 class="text-center" style="margin-bottom: 24px;">👥 Manage Cashiers</h3>
+                <div class="form-group">
+                  <label for="new-cashier-name">Cashier Name</label>
+                  <div style="display: flex; gap: 8px;">
+                    <input type="text" id="new-cashier-name" placeholder="Enter cashier name" style="flex: 1;">
+                    <button type="button" id="btn-add-cashier" class="btn btn-primary btn-sm" style="margin-bottom: 0;">Add</button>
+                  </div>
+                </div>
+                <div class="form-group">
+                  <label>Current Cashiers</label>
+                  <div id="admin-cashiers-list" style="border: 2px solid var(--theme-border); border-radius: var(--radius-inputs); padding: 12px; max-height: 180px; overflow-y: auto; background: var(--theme-bg);">
+                    <!-- Dynamic cashier list -->
+                  </div>
+                </div>
+                <button type="button" id="btn-save-cashiers" class="btn btn-success btn-full">Save Cashiers</button>
               </div>
             </div>
           </div>
@@ -239,6 +259,19 @@
         <div class="form-group">
           <label for="checkout-message">Message (Optional)</label>
           <textarea id="checkout-message" placeholder="Add a message..." rows="3"></textarea>
+        </div>
+        <div class="form-group">
+          <label for="checkout-cashier">Select Cashier</label>
+          <select id="checkout-cashier" required>
+            <option value="">-- Select Cashier --</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="checkout-language">WhatsApp Message Language</label>
+          <select id="checkout-language">
+            <option value="en">English</option>
+            <option value="hi">Hindi</option>
+          </select>
         </div>
         <div id="checkout-summary" class="checkout-summary"></div>
       </div>
